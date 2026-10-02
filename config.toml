@@ -1,0 +1,8 @@
+[wafer]
+version = "0.1.0"
+database_path = "data/wafer.db"
+log_level = "INFO"
+
+[permissions]
+# Development policy: allow read-only tools; deny writes, execution, and admin.
+granted = ["READ"]
