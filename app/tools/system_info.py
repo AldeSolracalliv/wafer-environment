@@ -5,6 +5,9 @@ from app.security.permissions import Permission
 from app.tools.registry import Tool
 
 
+SYSTEM_INFO_TOOL = "system.info"
+
+
 def system_info(_: dict) -> dict[str, str]:
     return {
         "operating_system": platform.system(),
@@ -15,7 +18,7 @@ def system_info(_: dict) -> dict[str, str]:
 
 def create_system_info_tool() -> Tool:
     return Tool(
-        name="system.info",
+        name=SYSTEM_INFO_TOOL,
         description="Return basic, non-sensitive operating system and Python information.",
         parameter_schema={"type": "object", "properties": {}, "additionalProperties": False},
         required_permission=Permission.READ,

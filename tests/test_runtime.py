@@ -5,11 +5,14 @@ import logging
 import pytest
 
 from app.agents.registry import AgentRegistry, AgentStatus
+from app.agents.first import FirstAgent
+from app.agents.runtime import AgentLifecycle, AgentRequest, AgentResultStatus
 from app.core.database import Database
 from app.core.wafer import Wafer
 from app.jobs.manager import JobManager, JobStatus
 from app.security.permissions import Permission, PermissionDenied, PermissionManager
 from app.tools.registry import Tool, ToolRegistry
+from app.tools.runtime_status import RUNTIME_STATUS_TOOL
 from app.tools.system_info import create_system_info_tool
 
 
@@ -33,6 +36,10 @@ def test_agent_registry_and_persistence(tmp_path):
     assert registry.list_agents() == [agent]
     restored = AgentRegistry(db, logger())
     assert restored.get_agent("sample").name == "Sample"
+    implementation = SampleAgent(description="updated implementation")
+    restored.register_agent(implementation)
+    assert restored.get_agent("sample") is implementation
+    assert db.connection.execute("SELECT description FROM agents WHERE id = 'sample'").fetchone()[0] == "updated implementation"
     assert registry.unregister_agent("sample") == agent
     db.close()
 
@@ -81,8 +88,87 @@ def test_wafer_startup_without_agents_and_cli(tmp_path, capsys):
     wafer = Wafer(config)
     assert wafer.status == "ONLINE"
     assert wafer.agent_registry.list_agents() == []
-    assert [tool.name for tool in wafer.tool_registry.list_tools()] == ["system.info"]
+    assert {tool.name for tool in wafer.tool_registry.list_tools()} == {"system.info", "wafer.runtime_status"}
     assert "NOT CONFIGURED" in wafer.summary()
+    wafer.close()
+
+
+def test_agent_runtime_executes_registered_agent_and_tracks_lifecycle(tmp_path):
+    wafer, _ = make_policy_wafer(tmp_path)
+    agent = FirstAgent()
+    wafer.agent_registry.register_agent(agent)
+    wafer.permission_manager.grant("first", Permission.READ, RUNTIME_STATUS_TOOL)
+
+    result = wafer.agent_runtime.execute("first", AgentRequest("req-1", "wafer.health_check"))
+
+    assert result.request_id == "req-1"
+    assert result.status is AgentResultStatus.COMPLETED
+    assert result.output["overall_status"] == "healthy"
+    assert result.error is None
+    assert result.execution.lifecycle == (
+        AgentLifecycle.CREATED,
+        AgentLifecycle.INITIALIZING,
+        AgentLifecycle.READY,
+        AgentLifecycle.RUNNING,
+        AgentLifecycle.COMPLETED,
+        AgentLifecycle.IDLE,
+    )
+    assert result.execution.duration_ms >= 0
+    wafer.close()
+
+
+def test_agent_runtime_returns_structured_errors_and_recovers_to_idle(tmp_path):
+    wafer, _ = make_policy_wafer(tmp_path)
+
+    unknown = wafer.agent_runtime.execute("missing", AgentRequest("req-2", "task"))
+    assert unknown.status is AgentResultStatus.ERROR
+    assert unknown.error == "Unknown agent: missing"
+    assert unknown.execution.lifecycle == (
+        AgentLifecycle.CREATED,
+        AgentLifecycle.INITIALIZING,
+        AgentLifecycle.ERROR,
+        AgentLifecycle.IDLE,
+    )
+
+    agent = FirstAgent()
+    wafer.agent_registry.register_agent(agent)
+    invalid = wafer.agent_runtime.execute("first", AgentRequest("req-3", " "))
+    assert invalid.status is AgentResultStatus.ERROR
+    assert invalid.error == "task must not be empty"
+
+    class FailingAgent(FirstAgent):
+        def execute(self, request, context):
+            raise RuntimeError("execution failed")
+
+    wafer.agent_registry.unregister_agent("first")
+    wafer.agent_registry.register_agent(FailingAgent())
+    failed = wafer.agent_runtime.execute("first", AgentRequest("req-4", "valid task"))
+    assert failed.status is AgentResultStatus.ERROR
+    assert failed.error == "execution failed"
+    assert failed.execution.lifecycle[-3:] == (
+        AgentLifecycle.RUNNING,
+        AgentLifecycle.ERROR,
+        AgentLifecycle.IDLE,
+    )
+    wafer.close()
+
+
+def test_agent_runtime_routes_tool_calls_through_wafer_permissions(tmp_path):
+    wafer, _ = make_policy_wafer(tmp_path)
+
+    class ToolCallingAgent(FirstAgent):
+        def execute(self, request, context):
+            return context.call_tool("system.info")
+
+    wafer.agent_registry.register_agent(ToolCallingAgent())
+    denied = wafer.agent_runtime.execute("first", AgentRequest("req-4", "inspect"))
+    assert denied.status is AgentResultStatus.ERROR
+    assert "not permitted" in denied.error
+
+    wafer.permission_manager.grant("first", Permission.READ, "system.info")
+    allowed = wafer.agent_runtime.execute("first", AgentRequest("req-5", "inspect"))
+    assert allowed.status is AgentResultStatus.COMPLETED
+    assert set(allowed.output) == {"operating_system", "python_version", "architecture"}
     wafer.close()
 
 

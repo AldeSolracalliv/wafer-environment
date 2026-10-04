@@ -41,7 +41,20 @@ class AgentRegistry:
             self._agents[row["id"]] = AgentMetadata(row["id"], row["name"], row["description"], tuple(json.loads(row["capabilities"])), AgentStatus(row["status"]))
 
     def register_agent(self, agent: Agent) -> None:
-        if agent.id in self._agents:
+        registered = self._agents.get(agent.id)
+        if isinstance(registered, AgentMetadata):
+            if registered.status is not agent.status:
+                self.logger.warning("agent.implementation_not_attached id=%s status=%s",
+                                    agent.id, registered.status.value)
+                return
+            self.database.execute(
+                "UPDATE agents SET name = ?, description = ?, capabilities = ? WHERE id = ?",
+                (agent.name, agent.description, json.dumps(agent.capabilities), agent.id),
+            )
+            self._agents[agent.id] = agent
+            self.logger.info("agent.implementation_registered id=%s", agent.id)
+            return
+        if registered is not None:
             raise ValueError(f"Agent already registered: {agent.id}")
         self._agents[agent.id] = agent
         self.database.execute("INSERT INTO agents VALUES (?, ?, ?, ?, ?)", (agent.id, agent.name, agent.description, json.dumps(agent.capabilities), agent.status.value))

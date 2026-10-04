@@ -4,7 +4,11 @@ import logging
 from typing import Any, Callable
 
 from app.core.database import Database
-from app.security.permissions import Permission, PermissionManager
+from app.security.permissions import Permission, PermissionDenied, PermissionManager
+
+
+class UnknownToolError(KeyError):
+    """A tool name is unavailable after recording the access decision."""
 
 
 @dataclass(frozen=True)
@@ -43,8 +47,12 @@ class ToolRegistry:
     def execute_tool(self, name: str, parameters: dict[str, Any] | None = None, requester: str = "runtime") -> Any:
         tool = self.get_tool(name)
         if tool is None:
-            self.permissions.require(requester, name, None)
-            raise KeyError(f"Unknown tool: {name}")
+            decision = self.permissions.decide(requester, name, None)
+            if decision.reason != "unknown tool has no executable permission":
+                raise PermissionDenied(
+                    f"{requester!r} is not permitted to use tool access for {name!r}: {decision.reason}"
+                )
+            raise UnknownToolError(f"Unknown tool: {name}")
         self.permissions.require(requester, name, tool.required_permission)
         self.logger.info("tool.execution name=%s requester=%s", name, requester)
         return tool.implementation(parameters or {})

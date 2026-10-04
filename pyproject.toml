@@ -8,6 +8,9 @@ version = "0.1.0"
 description = "A local-first deterministic agent runtime foundation for Windows."
 requires-python = ">=3.12"
 
+[project.optional-dependencies]
+openai = ["openai>=1.66,<3"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

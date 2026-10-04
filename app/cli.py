@@ -1,8 +1,41 @@
 import argparse
+import json
 from pathlib import Path
+from pprint import pformat
+import sys
+from typing import Any
+from uuid import uuid4
 
-from app.core.wafer import Wafer
+from app.agents.runtime import AgentRequest, AgentResult, AgentResultStatus
+from app.host import create_host
 from app.security.permissions import Permission
+
+
+def _json_object(value: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as error:
+        raise argparse.ArgumentTypeError(f"invalid JSON context: {error.msg}") from error
+    if not isinstance(parsed, dict):
+        raise argparse.ArgumentTypeError("context must be a JSON object")
+    return parsed
+
+
+def format_agent_result(result: AgentResult) -> str:
+    lines = [f"Execution: {result.status.value}", f"Request ID: {result.request_id}"]
+    if result.execution is not None:
+        lines.append(f"Duration: {result.execution.duration_ms:.2f} ms")
+        lines.append("Lifecycle: " + " -> ".join(state.value for state in result.execution.lifecycle))
+    if result.status is AgentResultStatus.ERROR:
+        lines.append(f"Error: {result.error or 'Agent execution failed.'}")
+    else:
+        lines.append("Result:")
+        try:
+            rendered = json.dumps(result.output, indent=2, ensure_ascii=False)
+        except (TypeError, ValueError):
+            rendered = pformat(result.output, sort_dicts=False)
+        lines.append(rendered)
+    return "\n".join(lines)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -11,6 +44,10 @@ def main(argv: list[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command")
     for command in ("status", "agents", "tools", "jobs"):
         subparsers.add_parser(command)
+    run = subparsers.add_parser("run", help="Submit a request to an agent")
+    run.add_argument("agent_id")
+    run.add_argument("task")
+    run.add_argument("--context", type=_json_object, default={}, help="Request context as a JSON object")
     grant = subparsers.add_parser("grant", help="Grant an agent a permission")
     grant.add_argument("agent_id")
     grant.add_argument("permission", choices=[p.name for p in Permission])
@@ -22,10 +59,23 @@ def main(argv: list[str] | None = None) -> int:
     decisions = subparsers.add_parser("decisions", help="Show recent permission decisions")
     decisions.add_argument("--limit", type=int, default=20)
     args = parser.parse_args(argv)
-    wafer = Wafer(args.config)
+    try:
+        wafer = create_host(args.config)
+    except ValueError as error:
+        print(f"Configuration error: {error}", file=sys.stderr)
+        return 2
     try:
         command = args.command or "status"
-        if command == "status":
+        if command == "run":
+            request = AgentRequest(
+                request_id=str(uuid4()),
+                task=args.task,
+                context=args.context,
+            )
+            result = wafer.execute_agent(args.agent_id, request)
+            print(format_agent_result(result))
+            return 0 if result.status is AgentResultStatus.COMPLETED else 1
+        elif command == "status":
             print(wafer.summary())
         elif command == "agents":
             agents = wafer.agent_registry.list_agents()

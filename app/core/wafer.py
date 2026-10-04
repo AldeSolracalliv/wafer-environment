@@ -1,7 +1,8 @@
 from pathlib import Path
 import logging
 
-from app.agents.registry import AgentRegistry
+from app.agents.registry import Agent, AgentRegistry
+from app.agents.runtime import AgentRequest, AgentResult, AgentRuntime
 from app.core.config import WaferConfig
 from app.core.database import Database
 from app.core.logging import configure_logging
@@ -9,6 +10,7 @@ from app.jobs.manager import JobManager
 from app.memory.manager import MemoryManager
 from app.security.permissions import PermissionManager
 from app.tools.registry import ToolRegistry
+from app.tools.runtime_status import create_runtime_status_tool
 from app.tools.system_info import create_system_info_tool
 
 
@@ -24,15 +26,32 @@ class Wafer:
         self.permission_manager = PermissionManager(self.config.granted_permissions, self.logger, self.database)
         self.agent_registry = AgentRegistry(self.database, self.logger)
         self.tool_registry = ToolRegistry(self.database, self.permission_manager, self.logger)
+        self.agent_runtime = AgentRuntime(self.agent_registry, self.tool_registry, self.logger)
         self.job_manager = JobManager(self.database, self.logger)
         self.memory_manager = MemoryManager(self.database)
+        self.status = "ONLINE"
         if self.tool_registry.get_tool("system.info") is None:
             self.tool_registry.register_tool(create_system_info_tool())
-        self.status = "ONLINE"
+        if self.tool_registry.get_tool("wafer.runtime_status") is None:
+            self.tool_registry.register_tool(create_runtime_status_tool(
+                self.config.version,
+                lambda: self.status,
+                self.agent_registry,
+                self.tool_registry,
+                self.job_manager,
+            ))
         self.logger.info("wafer.started version=%s", self.config.version)
 
     def close(self) -> None:
         self.database.close()
+
+    def register_agent(self, agent: Agent) -> None:
+        """Explicitly register an implementation with this Wafer host."""
+        self.agent_registry.register_agent(agent)
+
+    def execute_agent(self, agent_id: str, request: AgentRequest) -> AgentResult:
+        """Submit a request through Wafer's generic agent runtime."""
+        return self.agent_runtime.execute(agent_id, request)
 
     def summary(self) -> str:
         agents = ", ".join(agent.id for agent in self.agent_registry.list_agents()) or "None"
